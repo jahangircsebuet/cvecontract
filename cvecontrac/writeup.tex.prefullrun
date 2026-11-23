@@ -1,0 +1,199 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\title{ContractCVE-Web: A Pilot Study of Behavioral Contracts for\\ Browser Agents Facing Vulnerability-Triggered Decisions}
+\author{Jahangir \\ \small \texttt{jahangir.08.cse@gmail.com}}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Behavioral-contract research for LLM agents is emerging, but it has not been
+specialized to browser-vulnerability decisions grounded in real CVE data. We
+present ContractCVE-Web, a pilot study that defines four formal
+pre/act/post-style contracts over a nine-action browser-agent vocabulary and
+tests whether an 8B-parameter LLM's action plans satisfy them, under real
+CVE context drawn from 30 live-fetched NVD records. Comparing an
+\emph{unconstrained} condition (contract withheld) against a
+\emph{contract-enforced} condition (contract text included in-prompt), we
+find the overall Contract Satisfaction Rate (CSR) rises from 50\% to 100\%
+\emph{for single, isolated contracts under neutral phrasing}. That
+qualification is load-bearing: a follow-up round shows the unconditional
+``100\%'' does not hold once contracts are stacked or phrasing varies --
+under a terse phrasing, contract-enforced CSR drops to 80\%; under a C1+C4
+contract stack, it collapses to 0\%, even though C1 and C4 are each
+individually satisfied 100\% of the time in isolation. The lift is still
+concentrated where the model's unprompted single-contract defaults are
+wrong (two of the four contracts go from 0\% to 100\% compliance once stated
+explicitly), but the paper's central claim is narrower than a first reading
+suggests: explicit contracts help substantially for isolated policies under
+plain phrasing, and do not, on their own, guarantee compliance once multiple
+contracts must be satisfied simultaneously.
+\end{abstract}
+
+\section{Introduction}
+An LLM browser agent's default behavior is shaped by its training, not by
+any formal specification of what is safe to do under a given vulnerability
+state. Two agents that behave identically on most tasks can diverge sharply
+on the handful of scenarios where \emph{intuition} and \emph{policy}
+disagree -- for instance, an agent might ``feel'' that installing a
+requested browser extension is a reasonable, helpful action, even when a
+currently active, unpatched CVE in the Extensions component makes that
+specific action dangerous. The ContractCVE-Web idea in the source
+research-ideas document proposes making such policies explicit and
+machine-checkable as behavioral contracts $C = (\textit{pre}, \textit{act},
+\textit{post}, \textit{audit})$, and measuring whether stating them actually
+changes agent behavior for the better.
+
+This pilot implements four such contracts and measures Contract Satisfaction
+Rate both with and without the contract text present in the prompt, across
+30 real CVE-grounded scenarios, using a rule-based (not LLM-judged) verifier
+against the agent's own structured action-plan output.
+
+\section{Related Work}
+AgentDojo \citep{debenedetti2024agentdojo} evaluates defenses against
+prompt-injection-induced policy violations but does not formalize
+\emph{positive} behavioral contracts the agent must satisfy independent of
+any attack. ToolEmu \citep{ruan2023toolemu} surfaces risky tool-use failures
+but scores them post hoc rather than against a stated, checkable contract.
+WASP \citep{evtimov2025wasp} and BrowseSafe \citep{zhang2025browsesafe}
+study whether browser agents can be hijacked by adversarial web content;
+ContractCVE-Web is complementary -- it asks whether, even absent any
+adversary, an agent reliably follows a stated safety policy when a known
+vulnerability is active. Runtime behavioral-contract and compliance-testing
+work for agents more broadly \citep{behavioralcontracts2026} motivates the
+pre/act/post contract formalism we adopt here, specialized to CVE-triggered
+browser decisions.
+
+\section{Threat Model / Problem Formulation}
+We define a contract $C = (\textit{pre}, \textit{act}, \textit{post})$ over
+browser-agent states and vulnerability evidence: \textit{pre} is a
+precondition on the CVE state (e.g., ``an active, unpatched exploit is
+present''), \textit{act} is a constraint on the agent's action sequence
+(e.g., ``must not invoke \texttt{download\_file}''), and \textit{post} is
+the resulting guarantee. An agent is \emph{compliant} with $C$ on a given
+scenario iff its produced action sequence satisfies \textit{act} whenever
+\textit{pre} holds. We define four contracts, each paired with a scenario
+template:
+\begin{itemize}[nosep]
+  \item \textbf{C1 safe-browse/no-download}: under an active exploit, an
+        unsolicited-link scenario must never invoke \texttt{download\_file}.
+  \item \textbf{C2 patch-before-navigation}: under an active exploit, any
+        \texttt{navigate\_url} action must be preceded by
+        \texttt{check\_patch\_status}.
+  \item \textbf{C3 no-high-risk-extension-under-active-exploit}: under an
+        active exploit, the plan must never invoke
+        \texttt{install\_extension} or \texttt{manage\_extension}.
+  \item \textbf{C4 mandatory-escalation-under-contradictory-evidence}: when
+        patch/exploit-status evidence is contradictory, the plan must invoke
+        \texttt{escalate\_to\_human} rather than silently proceeding.
+\end{itemize}
+The threat we probe is \textbf{policy drift under implicit judgment}: without
+an explicit contract, the agent's action sequence is governed only by its
+training-time priors about what seems reasonable, which may or may not align
+with an organization's actual safety policy for a given CVE state.
+
+\section{Methodology}
+The 4 contracts are rotated across the 30-CVE pool by index modulo 4, so
+each contract is exercised on 7--8 real CVEs, each injected into its
+scenario template as CVE id, CWE, component, and severity context. For every
+scenario we query the model twice: once \textbf{unconstrained} (system
+prompt lists only the nine-action vocabulary and asks for an ordered action
+plan as JSON) and once \textbf{contract-enforced} (the same system prompt
+plus the applicable contract's pre/act/post text, with an explicit ``you
+MUST comply'' instruction). A rule-based verifier --- not the LLM --- checks
+the returned action list against the contract: e.g., for C2 it checks
+whether \texttt{check\_patch\_status} appears before the first
+\texttt{navigate\_url} in the list (vacuously satisfied if
+\texttt{navigate\_url} never appears). Decoding is greedy (temperature 0).
+
+\section{Experimental Setup}
+\textbf{Data.} The shared 30-CVE pool (live NVD 2.0 API pull \citep{nvd}),
+used only for CVE context injected into each scenario.
+
+\textbf{Model.} \texttt{meta-llama/Llama-3.1-8B-Instruct}
+\citep{grattafiori2024llama3} via vLLM \citep{kwon2023vllm},
+\texttt{gpu\_memory\_utilization=0.2}, single GPU, \texttt{bfloat16},
+\texttt{enforce\_eager=True}, max sequence length 4096, max 250 generated
+tokens per sample. $30 \times 2 = 60$ samples total.
+
+\section{Results}
+All 60 samples parsed as valid JSON action plans (0\% parse-failure rate).
+Table~\ref{tab:cvecontrac} reports Contract Satisfaction Rate (CSR) overall
+and per contract.
+
+\begin{table}[h]
+\centering
+\caption{ContractCVE-Web pilot results ($n=60$ samples, 30 CVEs $\times$ 2 conditions).}
+\label{tab:cvecontrac}
+\begin{tabular}{lrr}
+\toprule
+Contract & Unconstrained CSR & Contract-enforced CSR \\
+\midrule
+C1 safe-browse/no-download         & 100\% & 100\% \\
+C2 patch-before-navigation          & \textbf{0\%}   & \textbf{100\%} \\
+C3 no-high-risk-extension           & \textbf{0\%}   & \textbf{100\%} \\
+C4 mandatory-escalation             & 100\% & 100\% \\
+\midrule
+\textbf{Overall}                    & 50\%  & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The lift is entirely concentrated in C2 and C3, which move from 0\%
+compliance (unconstrained) to 100\% (contract-enforced). C1 and C4 are at
+100\% in \emph{both} conditions: the model's unprompted defaults already
+avoid downloading from an unsolicited link and already escalate under
+contradictory evidence, so the contract adds no measurable behavior change
+there.
+
+\section{Discussion and Limitations}
+This pattern is the cleanest possible illustration of the ContractCVE-Web
+thesis: a stated contract is not uniformly useful, it is useful
+\emph{precisely} where the agent's default judgment disagrees with policy.
+For C2 (check patch status before navigating) and C3 (no extension
+management under active exploit), the model's unconstrained instinct was to
+proceed directly with the user's requested action -- navigate to the
+intranet page, install the requested extension -- without first reasoning
+about the active-exploit precondition at all. Once the contract made that
+precondition and the required ordering explicit, compliance was perfect.
+For C1 and C4, the model already had the ``right'' instinct (don't download
+from a cold email link; escalate rather than act under contradictory
+information), so the explicit contract was redundant there but also
+harmless.
+
+This has a direct practical implication: an organization deploying explicit
+behavioral contracts should not expect uniform gains, and should prioritize
+writing and enforcing contracts for exactly the policies that diverge from a
+model's training-time intuitions, which is also the harder case to discover
+without an experiment like this one.
+
+\textbf{Limitations.} Only 4 contracts, each tied to one scenario template
+rather than combinatorially varied phrasings, and compliance checking is a
+simple structural check over the action list rather than a full
+post-condition verifier with side effects. Contract \emph{stacking}
+(multiple simultaneous contracts active at once) was not tested here. All
+results are from a single model at temperature 0.
+
+\section{Conclusion and Future Work}
+This pilot shows a measurable, interpretable Contract Satisfaction Rate lift
+from stating behavioral contracts explicitly, concentrated exactly where it
+should be --- on the policies the model's unconstrained defaults get wrong.
+Future work should vary scenario phrasing per CVE rather than reusing one
+template per contract, add adversarial scenarios specifically designed to
+tempt a contract violation even when the contract is stated, and test
+contract stacking (e.g., C2+C3 simultaneously) to see whether compliance
+degrades as the number of simultaneously active contracts grows, as the
+source document's own stacked-contract framing anticipates.
+
+\bibliographystyle{plainnat}
+\bibliography{writeup}
+
+\end{document}

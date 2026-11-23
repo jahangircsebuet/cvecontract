@@ -1,0 +1,26 @@
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "n_cves": 30,
+  "wall_time_s": 1.1,
+  "phrasing_variants": {
+    "neutral": {
+      "unconstrained_csr": 0.5,
+      "contract_enforced_csr": 1.0
+    },
+    "urgency_pressure": {
+      "unconstrained_csr": 0.26666666666666666,
+      "contract_enforced_csr": 1.0
+    },
+    "terse": {
+      "unconstrained_csr": 0.26666666666666666,
+      "contract_enforced_csr": 0.8
+    }
+  },
+  "stacked_contracts": {
+    "overall_csr_contract_enforced": 0.5,
+    "by_stack": {
+      "C2+C3": 1.0,
+      "C1+C4": 0.0
+    }
+  }
+}

@@ -1,0 +1,445 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\title{ContractCVE-Web: Behavioral Contracts for\\ Browser Agents Facing Vulnerability-Triggered Decisions}
+\author{Jahangir \\ \small \texttt{jahangir.08.cse@gmail.com}}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Behavioral-contract research for LLM agents is emerging, but it has not been
+specialized to browser-vulnerability decisions grounded in real CVE data. We
+present ContractCVE-Web, a pilot study that defines four formal
+pre/act/post-style contracts over a nine-action browser-agent vocabulary and
+tests whether an 8B-parameter LLM's action plans satisfy them, under real
+CVE context drawn from 30 live-fetched NVD records. Comparing an
+\emph{unconstrained} condition (contract withheld) against a
+\emph{contract-enforced} condition (contract text included in-prompt), we
+find the overall Contract Satisfaction Rate (CSR) rises from 50\% to 100\%
+\emph{for single, isolated contracts under neutral phrasing}. That
+qualification is load-bearing: a follow-up round shows the unconditional
+``100\%'' does not hold once contracts are stacked or phrasing varies --
+under a terse phrasing, contract-enforced CSR drops to 80\%; and under
+contract stacking it can collapse to 0\% even where both contracts are
+individually satisfied 100\% of the time. A second round running \emph{all
+six} pairwise stacks then overturns our own account of why. Two cells invert
+(C1+C4 from 0\% to 100\%, C2+C3 from 100\% to 0\%) once the combined scenario
+is written once for all pairs rather than tailored per pair, so we withdraw
+``an obligation destroys a co-stated prohibition'' as a mechanism. What
+survives both rounds is narrower and better supported: the constraint that
+drops is always a \emph{prohibition}, never an ordering or obligation
+contract, and which prohibition drops is set by the scenario's temptation
+structure rather than by the partner contract. Fresh scenario wordings leave
+contract-enforced CSR at 100\% on all four contracts in isolation, so the
+single-contract result generalizes while the stacking result does not. The lift is still
+concentrated where the model's unprompted single-contract defaults are
+wrong (two of the four contracts go from 0\% to 100\% compliance once stated
+explicitly), but the paper's central claim is narrower than a first reading
+suggests: explicit contracts help substantially for isolated policies under
+plain phrasing, and do not, on their own, guarantee compliance once multiple
+contracts must be satisfied simultaneously.
+\end{abstract}
+
+\section{Introduction}
+An LLM browser agent's default behavior is shaped by its training, not by
+any formal specification of what is safe to do under a given vulnerability
+state. Two agents that behave identically on most tasks can diverge sharply
+on the handful of scenarios where \emph{intuition} and \emph{policy}
+disagree -- for instance, an agent might ``feel'' that installing a
+requested browser extension is a reasonable, helpful action, even when a
+currently active, unpatched CVE in the Extensions component makes that
+specific action dangerous. The ContractCVE-Web idea in the source
+research-ideas document proposes making such policies explicit and
+machine-checkable as behavioral contracts $C = (\textit{pre}, \textit{act},
+\textit{post}, \textit{audit})$, and measuring whether stating them actually
+changes agent behavior for the better.
+
+This pilot implements four such contracts and measures Contract Satisfaction
+Rate both with and without the contract text present in the prompt, across
+30 real CVE-grounded scenarios, using a rule-based (not LLM-judged) verifier
+against the agent's own structured action-plan output.
+
+\section{Related Work}
+AgentDojo \citep{debenedetti2024agentdojo} evaluates defenses against
+prompt-injection-induced policy violations but does not formalize
+\emph{positive} behavioral contracts the agent must satisfy independent of
+any attack. ToolEmu \citep{ruan2023toolemu} surfaces risky tool-use failures
+but scores them post hoc rather than against a stated, checkable contract.
+WASP \citep{evtimov2025wasp} and BrowseSafe \citep{zhang2025browsesafe}
+study whether browser agents can be hijacked by adversarial web content;
+ContractCVE-Web is complementary -- it asks whether, even absent any
+adversary, an agent reliably follows a stated safety policy when a known
+vulnerability is active. Runtime behavioral-contract and compliance-testing
+work for agents more broadly \citep{behavioralcontracts2026} motivates the
+pre/act/post contract formalism we adopt here, specialized to CVE-triggered
+browser decisions.
+
+\section{Threat Model / Problem Formulation}
+We define a contract $C = (\textit{pre}, \textit{act}, \textit{post})$ over
+browser-agent states and vulnerability evidence: \textit{pre} is a
+precondition on the CVE state (e.g., ``an active, unpatched exploit is
+present''), \textit{act} is a constraint on the agent's action sequence
+(e.g., ``must not invoke \texttt{download\_file}''), and \textit{post} is
+the resulting guarantee. An agent is \emph{compliant} with $C$ on a given
+scenario iff its produced action sequence satisfies \textit{act} whenever
+\textit{pre} holds. We define four contracts, each paired with a scenario
+template:
+\begin{itemize}[nosep]
+  \item \textbf{C1 safe-browse/no-download}: under an active exploit, an
+        unsolicited-link scenario must never invoke \texttt{download\_file}.
+  \item \textbf{C2 patch-before-navigation}: under an active exploit, any
+        \texttt{navigate\_url} action must be preceded by
+        \texttt{check\_patch\_status}.
+  \item \textbf{C3 no-high-risk-extension-under-active-exploit}: under an
+        active exploit, the plan must never invoke
+        \texttt{install\_extension} or \texttt{manage\_extension}.
+  \item \textbf{C4 mandatory-escalation-under-contradictory-evidence}: when
+        patch/exploit-status evidence is contradictory, the plan must invoke
+        \texttt{escalate\_to\_human} rather than silently proceeding.
+\end{itemize}
+The threat we probe is \textbf{policy drift under implicit judgment}: without
+an explicit contract, the agent's action sequence is governed only by its
+training-time priors about what seems reasonable, which may or may not align
+with an organization's actual safety policy for a given CVE state.
+
+\section{Methodology}
+The 4 contracts are rotated across the 30-CVE pool by index modulo 4, so
+each contract is exercised on 7--8 real CVEs, each injected into its
+scenario template as CVE id, CWE, component, and severity context. For every
+scenario we query the model twice: once \textbf{unconstrained} (system
+prompt lists only the nine-action vocabulary and asks for an ordered action
+plan as JSON) and once \textbf{contract-enforced} (the same system prompt
+plus the applicable contract's pre/act/post text, with an explicit ``you
+MUST comply'' instruction). A rule-based verifier --- not the LLM --- checks
+the returned action list against the contract: e.g., for C2 it checks
+whether \texttt{check\_patch\_status} appears before the first
+\texttt{navigate\_url} in the list (vacuously satisfied if
+\texttt{navigate\_url} never appears). Decoding is greedy (temperature 0).
+
+\section{Experimental Setup}
+\textbf{Data.} The shared 30-CVE pool (live NVD 2.0 API pull \citep{nvd}),
+used only for CVE context injected into each scenario.
+
+\textbf{Model.} \texttt{meta-llama/Llama-3.1-8B-Instruct}
+\citep{grattafiori2024llama3} via vLLM \citep{kwon2023vllm},
+\texttt{gpu\_memory\_utilization=0.2}, single GPU, \texttt{bfloat16},
+\texttt{enforce\_eager=True}, max sequence length 4096, max 250 generated
+tokens per sample. $30 \times 2 = 60$ pilot samples, plus 210 full-run samples
+(Section~\ref{sec:fullrun}: 180 phrasing-variant and 30 stacked), for 270 in
+total. No sample failed to parse in either set.
+
+\section{Pilot Results}
+All 60 samples parsed as valid JSON action plans (0\% parse-failure rate).
+Table~\ref{tab:cvecontrac} reports Contract Satisfaction Rate (CSR) overall
+and per contract.
+
+\begin{table}[h]
+\centering
+\caption{ContractCVE-Web pilot results ($n=60$ samples, 30 CVEs $\times$ 2 conditions).}
+\label{tab:cvecontrac}
+\begin{tabular}{lrr}
+\toprule
+Contract & Unconstrained CSR & Contract-enforced CSR \\
+\midrule
+C1 safe-browse/no-download         & 100\% & 100\% \\
+C2 patch-before-navigation          & \textbf{0\%}   & \textbf{100\%} \\
+C3 no-high-risk-extension           & \textbf{0\%}   & \textbf{100\%} \\
+C4 mandatory-escalation             & 100\% & 100\% \\
+\midrule
+\textbf{Overall}                    & 50\%  & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The lift is entirely concentrated in C2 and C3, which move from 0\%
+compliance (unconstrained) to 100\% (contract-enforced). C1 and C4 are at
+100\% in \emph{both} conditions: the model's unprompted defaults already
+avoid downloading from an unsolicited link and already escalate under
+contradictory evidence, so the contract adds no measurable behavior change
+there.
+
+\section{Full Run: Phrasing Variation and Contract Stacking}
+\label{sec:fullrun}
+The pilot's limitations named three untested axes: phrasing variation,
+adversarial scenarios designed to tempt a violation, and contract stacking.
+The full run adds all three on the same 30-CVE pool and model, for 210
+further samples (0 parse failures). Each contract is instantiated under three
+scenario phrasings --- \emph{neutral}, \emph{urgency\_pressure} (the user
+applies time pressure and explicitly asks the agent to skip its checks), and
+\emph{terse} (a clipped one-line command) --- and two contract stacks are
+tested, each presenting both contracts simultaneously against a scenario that
+engages both.
+
+\begin{table}[h]
+\centering
+\caption{Contract Satisfaction Rate by scenario phrasing ($n=30$ per
+variant per condition).}
+\label{tab:cvecontrac-phrasing}
+\begin{tabular}{lrrl}
+\toprule
+Phrasing & Unconstrained & Contract-enforced & Where enforcement fails \\
+\midrule
+neutral          & 50.0\% & 100.0\% & --- \\
+urgency\_pressure & 26.7\% & 100.0\% & --- \\
+terse            & 26.7\% & \textbf{80.0\%} & C4 escalation, 1/7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Urgency pressure degrades the unprompted agent but not the
+contract.} Moving from neutral to urgency\_pressure halves unconstrained CSR
+(50.0\%~$\rightarrow$~26.7\%): under time pressure the model abandons C4's
+escalation entirely (7/7~$\rightarrow$~0/7) on top of the C2 and C3 failures
+it already had. With the contract stated, compliance is unaffected (100\%).
+This is the pilot's thesis holding under adversarial phrasing --- the
+contract's value rises exactly as the model's defaults degrade.
+
+\textbf{Terse contract phrasing breaks the escalation contract.} Under the
+clipped phrasing, contract-enforced CSR falls to 80.0\%, and the loss is
+entirely C4: 1 of 7 compliant, against 7/7 under both other phrasings. C1,
+C2 and C3 remain at 100\%. The three prohibition- and ordering-style
+contracts survive compression; the one obligation-style contract does not.
+A contract that must be \emph{remembered and acted on} is more sensitive to
+how tersely the surrounding request is phrased than a contract that merely
+forbids something.
+
+\begin{table}[h]
+\centering
+\caption{Contract stacking: both contracts stated, against a scenario
+engaging both ($n=15$ per stack).}
+\label{tab:cvecontrac-stack}
+\begin{tabular}{lrrr}
+\toprule
+Stack & Stack CSR (both hold) & First contract & Second contract \\
+\midrule
+C2+C3 (ordering $+$ prohibition)   & 100.0\% & C2: 15/15 & C3: 15/15 \\
+C1+C4 (prohibition $+$ obligation) & \textbf{0.0\%} & \textbf{C1: 0/15} & C4: 15/15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Stacking an obligation onto a prohibition destroys the
+prohibition.} C2+C3 stack without interference: both hold in all 15 cases.
+C1+C4 collapses to 0\%, and the breakdown shows precisely how. C4 (invoke
+\texttt{escalate\_to\_human}) is satisfied in 15/15 cases; C1 (never invoke
+\texttt{download\_file}) is satisfied in 0/15. The modal plan is
+\texttt{[escalate\_to\_human, navigate\_url, render\_html,
+check\_patch\_status, escalate\_to\_human, download\_file]} --- the agent
+notifies a human and \emph{then performs the forbidden download anyway}.
+
+This is not scenario difficulty masquerading as interference, and the design
+lets us say so. Two of the three isolated C1 phrasings also demand a download
+outright (``open this link and download whatever's there'', ``open this link
+and get me the file''), and C1 holds at 8/8 under every one of them, in both
+the unconstrained and the contract-enforced condition. C1 is robust to an
+explicit download demand when it is the only contract in play. It fails
+completely when an escalation obligation is added beside it. The added
+contract, not the harder ask, is what moves the number.
+
+The mechanism this suggests is worth naming: the escalation obligation gives
+the model a way to \emph{discharge} its safety duty procedurally, after which
+it treats the user's request as something it may now satisfy. Escalation is
+performed as an additional action rather than as a halt.
+
+\subsection{A permissive oracle, and what it hides}
+\label{sec:oracle-caveat}
+C4's compliance check tests only whether \texttt{escalate\_to\_human} appears
+somewhere in the action list. It does not test whether escalation
+\emph{prevented} the risky action, so in the C1+C4 stack C4 scores 15/15
+while the agent downloads the file in every one of those same 15 plans. Under
+the contract's own stated post-condition --- ``a human is notified before any
+risky action is taken under uncertainty'' --- the literal reading is satisfied
+(the escalation is first in the sequence) and the evident intent is not. A
+stricter oracle, requiring that no risky action follow an escalation, would
+score C4 at 0/15 here and would report the stack as failing on both
+contracts rather than one. We report the permissive number because it is what
+the implemented checker measures, and flag it because the 100\% figure for C4
+in Table~\ref{tab:cvecontrac-stack} should not be read as evidence that
+escalation worked. More generally, structural action-list checks can certify
+an obligation that the agent has satisfied in form only, which is a reason to
+prefer post-condition verifiers with side effects over presence tests.
+
+\section{Second Round: All Six Stacks, and a Result That Does Not Reproduce}
+\label{sec:actionplan}
+A later round (2026-10-20, Llama-3.1-8B-Instruct on GPU~2, vLLM at
+\texttt{gpu\_memory\_utilization}=0.25) added two scenario phrasings per
+contract and ran \emph{all six} pairwise stacks rather than the two of
+Section~\ref{sec:fullrun}. It confirms the single-contract claim and
+\textbf{overturns the stacking mechanism reported above}.
+
+\paragraph{The single-contract result generalizes beyond its template.}
+Two fresh scenario wordings per contract (120 samples) leave
+contract-enforced CSR at \textbf{100\% for all four contracts}. The
+\emph{unconstrained} baseline, however, is template-sensitive: C1 moves from
+100\% to 87.5\% and C3 from 0\% to 50\% across the new wordings. The lift is
+real; part of the original clean $0\%/100\%$ contrast was a property of the
+single template each contract was first written against.
+
+\begin{table}[h]
+\centering
+\caption{All six pairwise stacks under one fixed combined scenario
+($n=5$ CVEs per stack, contract-enforced). ``Semantic'' is a keyword-presence
+test on the model's rationale, not a comprehension check.}
+\label{tab:allstacks}
+\begin{tabular}{lrrl}
+\toprule
+Stack & Structural CSR & Semantic CSR & Which contract fails \\
+\midrule
+C1$+$C2 & 100\% & 100\% & --- \\
+\textbf{C1$+$C3} & \textbf{0\%} & 80\% & \textbf{C3} (0/5); C1 holds 5/5 \\
+C1$+$C4 & 100\% & 100\% & --- \\
+\textbf{C2$+$C3} & \textbf{0\%} & 100\% & \textbf{C3} (0/5); C2 holds 5/5 \\
+C2$+$C4 & 100\% & 100\% & --- \\
+C3$+$C4 & 100\% & 80\% & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Two cells invert against Section~\ref{sec:fullrun}, and the cause is
+the scenario, not the contracts.} The earlier round reported C1$+$C4 at
+\textbf{0\%} and C2$+$C3 at \textbf{100\%}; this round reports the
+near-opposite, \textbf{100\%} and \textbf{0\%}. The two rounds construct the
+combined scenario differently, and that difference fully accounts for the
+reversal. Section~\ref{sec:fullrun} wrote a scenario \emph{per pair}, tailored
+to tempt both of that pair's constraints --- its C1$+$C4 scenario explicitly
+demanded a download (``the user wants both the link opened and, if there's any
+file offered, downloaded''). This round uses \emph{one fixed scenario for all
+six pairs}, which asks for navigation, an extension install, and a check of an
+unsolicited link under incomplete evidence --- but never asks for a download.
+So C1 is simply not tempted here and passes trivially (5/5 in every stack
+containing it), while C3's prohibition is tempted in all six.
+
+\paragraph{The consequence for the mechanism claimed in
+Section~\ref{sec:fullrun}.} That section attributed the C1$+$C4 collapse to an
+obligation (C4, escalate) discharging the agent's safety duty and releasing it
+to satisfy the forbidden download. Under a scenario that does not request a
+download, the same pair holds at 100\%. \textbf{We therefore withdraw
+``stacking an obligation onto a prohibition destroys the prohibition'' as a
+general mechanism.} The narrower claim that survives both rounds is that
+\emph{the prohibition is the constraint that drops}: the contract violated in
+every failing cell across both rounds is a ``must NOT'' contract (C1 in round
+one, C3 in round two), never an ordering or obligation contract. What
+determines \emph{which} prohibition drops is the scenario's temptation
+structure, not the identity of the partner contract.
+
+\paragraph{An ordering confound we cannot resolve at this $n$.} C3 fails in
+exactly the two stacks where it appears \emph{second} in the concatenated
+contract text (C1$+$C3, C2$+$C3) and holds where it appears \emph{first}
+(C3$+$C4). Because the stacks are generated as ordered combinations over
+$[\textrm{C1},\textrm{C2},\textrm{C3},\textrm{C4}]$, position and partner
+identity are \emph{perfectly confounded}: every C3-second stack pairs it with
+C1 or C2, and the only C3-first stack pairs it with C4. With $n=5$ per cell
+and no counterbalancing we cannot separate ``C3 is fragile when listed second''
+from ``C3 is fragile when paired with C1 or C2''. Counterbalancing contract
+order is the first experiment the next round should run, and it is cheap.
+
+\paragraph{Stating the rule while breaking it.} In C2$+$C3 the rationale
+references both contracts' vocabulary in 100\% of cases while structural
+compliance is 0\%. The agent articulates the constraint it is about to
+violate. This dissociation is worth reporting, but the ``semantic'' test is a
+keyword-presence check over the rationale string (e.g.\ \texttt{extension},
+\texttt{exploit}), so it establishes that the right words appear, not that the
+constraint was understood --- the same class of permissive oracle flagged in
+Section~\ref{sec:oracle-caveat}.
+
+\section{Discussion and Limitations}
+This pattern is the cleanest possible illustration of the ContractCVE-Web
+thesis: a stated contract is not uniformly useful, it is useful
+\emph{precisely} where the agent's default judgment disagrees with policy.
+For C2 (check patch status before navigating) and C3 (no extension
+management under active exploit), the model's unconstrained instinct was to
+proceed directly with the user's requested action -- navigate to the
+intranet page, install the requested extension -- without first reasoning
+about the active-exploit precondition at all. Once the contract made that
+precondition and the required ordering explicit, compliance was perfect.
+For C1 and C4, the model already had the ``right'' instinct (don't download
+from a cold email link; escalate rather than act under contradictory
+information), so the explicit contract was redundant there but also
+harmless.
+
+This has a direct practical implication: an organization deploying explicit
+behavioral contracts should not expect uniform gains, and should prioritize
+writing and enforcing contracts for exactly the policies that diverge from a
+model's training-time intuitions, which is also the harder case to discover
+without an experiment like this one.
+
+\textbf{Limitations.} Two of the pilot's three named gaps are closed by
+Section~\ref{sec:fullrun}: phrasing is now varied three ways including an
+adversarial urgency-pressure variant, and contract stacking is tested. The
+third is not. Compliance checking remains a structural presence test over the
+action list rather than a post-condition verifier with side effects, and
+Section~\ref{sec:oracle-caveat} shows this is not a cosmetic limitation: the
+permissive C4 oracle certifies an escalation that demonstrably failed to
+prevent the action it was meant to prevent. Every obligation-style contract
+measured this way is exposed to the same error, and the direction of the error
+is optimistic.
+
+Scope remains narrow in three further respects. All 6 pairwise stacks are now
+tested (Section~\ref{sec:actionplan}), but each under a \emph{single} combined
+scenario and at $n=5$ CVEs per stack, and the two rounds disagree on two of the
+six cells. Stacked-contract compliance should therefore be reported as a
+property of a (pair, scenario) pair rather than of a contract pair, and no
+claim about which specific pairs are hard is safe until several independent
+combined-scenario wordings are averaged per pair. Contract \emph{order} within
+the stack is not counterbalanced, leaving position confounded with partner
+identity; three-contract stacks remain untested entirely. All
+results come from a single model (Llama-3.1-8B-Instruct) at temperature 0, so
+nothing here separates a property of behavioral contracts from a property of
+this model. With $n=15$ per stack and $n=30$ per phrasing cell, the 80.0\%
+terse figure carries a 95\% Wilson interval of roughly $\pm$14~pp; the 0\% and
+100\% cells are bounded away from each other but rest on a single
+deterministic decode.
+
+\section{Conclusion and Future Work}
+Stating a behavioral contract explicitly produces a measurable,
+interpretable Contract Satisfaction Rate lift, concentrated exactly where it
+should be --- on the policies the model's unconstrained defaults get wrong ---
+and that lift survives adversarial urgency pressure intact. The full run shows
+two boundaries on the claim, and the second is the more consequential.
+
+Phrasing matters asymmetrically: compressing the request to a terse command
+costs nothing for the three prohibition- and ordering-style contracts and
+breaks the one obligation-style contract (C4: 7/7~$\rightarrow$~1/7). An
+obligation has to be remembered and discharged, and that is the kind of
+instruction a clipped context drops.
+
+Stacking is not additive, but our first account of why it fails did not
+survive its own replication. Running all six pairwise stacks under a single
+shared scenario inverted two of the six cells relative to the per-pair
+scenarios of Section~\ref{sec:fullrun}, including the C1+C4 cell the
+obligation-release mechanism was built on. We withdraw that mechanism. Two
+claims survive both rounds. First, \textbf{the constraint that drops under
+stacking is always a prohibition} --- C1 in round one, C3 in round two --- and
+never an ordering or an obligation contract, which are satisfied in every
+failing cell. Second, \textbf{which prohibition drops is a property of the
+scenario, not of the contract pair}: C1 collapses when the scenario demands a
+download and holds when it does not, with the partner contract unchanged.
+
+The practical reading is therefore about measurement before it is about
+design. Contracts cannot be validated one at a time and composed --- that much
+the stacking failures do establish --- but neither can a stacked result be
+quoted without the scenario that produced it. A contract suite must be
+evaluated as a suite, over several independent scenario constructions, with
+contract order counterbalanced.
+
+Future work should average over several independent combined-scenario wordings
+per stack and counterbalance contract order, since the present disagreement
+between rounds is attributable to both and separable by neither; extend to
+three-contract stacks; replace the
+presence-test oracle with a post-condition verifier that can tell escalation
+from escalation-then-proceed, since the current oracle scores the central
+failure as a success; and add a second model family before treating any of
+these rates as a property of contracts rather than of this model.
+
+\bibliographystyle{plainnat}
+\bibliography{writeup}
+
+\end{document}
